@@ -1133,6 +1133,52 @@ def test_locked_screen_message_is_shown_in_the_viewer_strip(make_app):
     assert any("kilitli" in t for t in texts(v.top))
 
 
+# --- geçen bağlantı süresi ---
+
+@pytest.mark.parametrize("seconds, want", [(0, "0:00"), (59.9, "0:59"), (65, "1:05"), (3599, "59:59"),
+                                           (3600, "1:00:00"), (3725, "1:02:05"), (-5, "0:00")])
+def test_fmt_duration(seconds, want):
+    assert gui.fmt_duration(seconds) == want
+
+
+def test_host_banner_shows_elapsed_time_and_the_counter_stops_on_disconnect(make_app):
+    app = make_app()
+    hp, host = start_host(app)
+    ui = host.ui
+    run_thread(ui.connected, "Ayşe", "88.1.2.3").join()
+    assert pump(app.root, lambda: hp.banner.winfo_ismapped())
+    assert "Süre: 0:0" in hp.banner.cget("text") and hp.since is not None and hp._elapsed_after is not None
+    hp.since -= 3725  # 1 saat 2 dk 5 sn önce bağlanmış gibi
+    hp._tick_elapsed()
+    assert "Süre: 1:02:0" in hp.banner.cget("text") and "Ayşe" in hp.banner.cget("text")
+    run_thread(ui.disconnected).join()
+    assert pump(app.root, lambda: not hp.banner.winfo_ismapped())
+    assert hp.since is None and hp._elapsed_after is None  # sayaç döngüsü bitti
+
+
+def test_a_second_connection_restarts_the_host_counter_with_a_single_loop(make_app):
+    app = make_app()
+    hp, host = start_host(app)
+    run_thread(host.ui.connected, "Bir", "1.1.1.1").join()
+    assert pump(app.root, lambda: hp._elapsed_after is not None)
+    hp.since -= 500
+    first_loop = hp._elapsed_after
+    run_thread(host.ui.connected, "İki", "2.2.2.2").join()
+    assert pump(app.root, lambda: hp._elapsed_after is not None and hp._elapsed_after != first_loop)
+    assert "İki" in hp.banner.cget("text") and "Süre: 0:0" in hp.banner.cget("text")  # sayaç sıfırlandı
+
+
+def test_viewer_shows_elapsed_time_from_the_first_frame(make_app):
+    app = make_app()
+    cp, client, v = open_viewer(app)
+    assert v.shown_at is not None and v.timer_lbl.cget("text").startswith("Süre: 0:0")
+    v.shown_at -= 65
+    v._tick_timer()
+    assert v.timer_lbl.cget("text").startswith("Süre: 1:0")
+    v.close()  # sayaç döngüsü iptal edilir, pencere yıkıldıktan sonra Tk'ye dokunan geri çağrı kalmaz
+    app.root.update()
+
+
 # --- kapanış: motorlar bloklamadan durur ---
 
 def test_closing_the_app_stops_engines_and_waits_for_teardown_threads(make_app):

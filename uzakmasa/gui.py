@@ -30,6 +30,7 @@ WARN_BYTES = 800 * 1024 * 1024  # ngrok ücretsiz kotası 1 GB/ay
 CONSENT_SECONDS = 30
 CLOSE_WAIT = 5.0  # kapanışta motor kapatma iş parçacıklarını en çok bu kadar bekle
 POLL_MS, VIEW_MS = 30, 16
+ELAPSED_MS = 1000  # geçen bağlantı süresi etiketi saniyede bir yenilenir
 MAX_UPSCALE = 1.5
 BOLD = ("Segoe UI", 11, "bold")
 TONES = {"": "TLabel", "hint": "Hint.TLabel", "good": "Good.TLabel", "bad": "Bad.TLabel", "warn": "Warn.TLabel"}
@@ -58,6 +59,14 @@ def fmt_bytes(n: int) -> str:
     if n < 1024 ** 3:
         return f"{n / 1024 ** 2:.0f} MB"
     return f"{n / 1024 ** 3:.2f} GB"
+
+
+def fmt_duration(seconds: float) -> str:
+    """Geçen süre: 1 saatten kısaysa D:SS, değilse S:DD:SS."""
+    s = max(0, int(seconds))
+    h, rest = divmod(s, 3600)
+    m, sec = divmod(rest, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
 def fit_rect(fw, fh, cw, ch):
@@ -248,6 +257,7 @@ class Viewer:
         self.keys = KeyMapper(send)
         self.pressed = set()  # Host'a iletilen basılı fare düğmeleri
         self.closed = self.shown = False
+        self.shown_at = None  # time.monotonic() ile ilk kare anı
         self.top = top = tk.Toplevel(app.root)
         top.withdraw()  # ilk kare gelene kadar görünmez
         top.title(title)
@@ -260,6 +270,8 @@ class Viewer:
         bar.pack(side="bottom", fill="x")
         self.status_lbl = ttk.Label(bar, text="Bağlanıyor…")  # StringVar yok: motor iş parçacığı bu nesneyi bırakırsa __del__ Tk'ye dokunurdu
         self.status_lbl.pack(side="left")
+        self.timer_lbl = ttk.Label(bar, text="")  # geçen bağlantı süresi, ilk kare gelince başlar
+        self.timer_lbl.pack(side="left", padx=(app.px(16), 0))
         ttk.Button(bar, text="Bağlantıyı Kes", command=self.close, takefocus=False).pack(side="right")
         self.canvas = c = tk.Canvas(top, bg="black", highlightthickness=0, takefocus=True)
         c.pack(fill="both", expand=True)
@@ -279,6 +291,7 @@ class Viewer:
         c.bind("<KeyRelease>", self._on_key_release)
         c.bind("<FocusOut>", self._on_focus_out)
         self._after = top.after(VIEW_MS, self._tick)
+        self._timer_after = top.after(ELAPSED_MS, self._tick_timer)
 
     # motor iş parçacığı
     def put(self, img):
@@ -317,6 +330,16 @@ class Viewer:
             if not self.closed:
                 self._after = self.top.after(VIEW_MS, self._tick)
 
+    def _tick_timer(self):
+        try:
+            if self.shown_at is not None:
+                self.timer_lbl.configure(text=f"Süre: {fmt_duration(time.monotonic() - self.shown_at)}")
+        except Exception:
+            _log(traceback.format_exc())
+        finally:
+            if not self.closed:
+                self._timer_after = self.top.after(ELAPSED_MS, self._tick_timer)
+
     def _draw(self, img, rect):
         x, y, dw, dh = rect
         if self._photo is None or (self._photo.width(), self._photo.height()) != (dw, dh):
@@ -331,6 +354,8 @@ class Viewer:
         self._rect = rect
         if not self.shown:
             self.shown = True
+            self.shown_at = time.monotonic()
+            self.timer_lbl.configure(text=f"Süre: {fmt_duration(0)}")
             self.top.deiconify()
             self.top.lift()
             self.canvas.focus_force()
@@ -395,6 +420,7 @@ class Viewer:
         self.closed = True
         self.keys.focus_out()  # Host'ta basılı tuş kalmasın
         self.top.after_cancel(self._after)
+        self.top.after_cancel(self._timer_after)
         self.top.destroy()
         self._photo = None  # PhotoImage Tk iş parçacığında bırakılsın (motor iş parçacığı Viewer'a son referansı tutabilir)
         if notify:
@@ -426,6 +452,7 @@ class HostPanel(ttk.Frame):
         self.app, self.cfg = app, app.cfg
         self.host = self.ui = None  # çalışan motor ve onun ui köprüsü
         self.ready, self.sent, self.gen = False, None, ""  # gen: son üretilen şifre
+        self.who, self.since, self._elapsed_after = "", None, None  # bağlı kişi, bağlanma anı (monotonic), sayaç after kimliği
         self.mode = tk.StringVar(value="relay" if self.cfg["mode"] == "relay" else "ngrok")
         self.token = tk.StringVar(value=self.cfg["ngrok_token"])
         self.relay = tk.StringVar(value=self.cfg["relay"])
@@ -638,6 +665,7 @@ class HostPanel(ttk.Frame):
                 host.stop()
             except Exception:
                 _log(traceback.format_exc())
+        self._stop_elapsed()
         self.banner.grid_remove()
         self.kick.state(["disabled"])
         self._status(msg, tone)
@@ -674,8 +702,30 @@ class HostPanel(ttk.Frame):
         # boşta duruma dön, kullanıcı düzeltip yeniden Başlat'a bassın
         self.stop(f"Hata: {text}", "bad")
 
+    def _render_banner(self):
+        if self.since is not None:
+            self.banner.configure(text=f"●  Bağlı: {self.who}  ·  Süre: {fmt_duration(time.monotonic() - self.since)}")
+
+    def _tick_elapsed(self):
+        try:
+            self._render_banner()
+        except Exception:
+            _log(traceback.format_exc())
+        finally:
+            if self.since is not None and not self.app.closing:
+                self._elapsed_after = self.after(ELAPSED_MS, self._tick_elapsed)
+
+    def _stop_elapsed(self):
+        self.since = None
+        if self._elapsed_after is not None:
+            self.after_cancel(self._elapsed_after)
+            self._elapsed_after = None
+
     def on_connected(self, name, addr):
-        self.banner.configure(text=f"●  Bağlı: {name}  ({addr})")
+        self._stop_elapsed()  # eski sayaç döngüsü varsa kapat: tek döngü kalsın
+        self.who, self.since = f"{name}  ({addr})", time.monotonic()
+        self._render_banner()
+        self._elapsed_after = self.after(ELAPSED_MS, self._tick_elapsed)
         self.banner.grid()
         self.kick.state(["!disabled"])
         self._status(f"Bağlı: {name}", "good")
@@ -683,6 +733,7 @@ class HostPanel(ttk.Frame):
             self.app.root.deiconify()  # görünmez bağlantı olmasın: pencere simge durumundaysa öne gelsin
 
     def on_disconnected(self):
+        self._stop_elapsed()
         self.banner.grid_remove()
         self.kick.state(["disabled"])
         if self.host is not None:
