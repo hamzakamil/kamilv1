@@ -453,7 +453,8 @@ class HostPanel(ttk.Frame):
         self.host = self.ui = None  # çalışan motor ve onun ui köprüsü
         self.ready, self.sent, self.gen = False, None, ""  # gen: son üretilen şifre
         self.who, self.since, self._elapsed_after = "", None, None  # bağlı kişi, bağlanma anı (monotonic), sayaç after kimliği
-        self.mode = tk.StringVar(value="relay" if self.cfg["mode"] == "relay" else "ngrok")
+        self.mode = tk.StringVar(value=self.cfg["mode"] if self.cfg["mode"] in ("bore", "ngrok", "relay") else "bore")
+        self.bore = tk.StringVar(value=self.cfg["bore_server"])
         self.token = tk.StringVar(value=self.cfg["ngrok_token"])
         self.relay = tk.StringVar(value=self.cfg["relay"])
         self.relay_token = tk.StringVar(value=self.cfg["relay_token"])
@@ -473,10 +474,23 @@ class HostPanel(ttk.Frame):
         modes = ttk.Frame(self)
         modes.grid(row=2, column=0, columnspan=3, sticky="w", pady=(P(12), P(4)))
         ttk.Label(modes, text="Bağlantı yöntemi:").pack(side="left")
-        self.rb_ngrok = ttk.Radiobutton(modes, text="ngrok (varsayılan)", value="ngrok", variable=self.mode)
+        self.rb_bore = ttk.Radiobutton(modes, text="Ücretsiz tünel (hesap yok)", value="bore", variable=self.mode)
+        self.rb_ngrok = ttk.Radiobutton(modes, text="ngrok (hesap + kart)", value="ngrok", variable=self.mode)
         self.rb_relay = ttk.Radiobutton(modes, text="Kendi relay sunucum", value="relay", variable=self.mode)
-        self.rb_ngrok.pack(side="left", padx=(P(12), P(8)))
+        self.rb_bore.pack(side="left", padx=(P(12), P(8)))
+        self.rb_ngrok.pack(side="left", padx=(0, P(8)))
         self.rb_relay.pack(side="left")
+
+        self.bore_box = box = ttk.LabelFrame(self, text="Ücretsiz tünel", padding=P(10))
+        box.grid(row=3, column=0, columnspan=3, sticky="ew")
+        box.columnconfigure(1, weight=1)
+        ttk.Label(box, text="Tünel sunucusu:").grid(row=0, column=0, sticky="w")
+        self.bore_entry = ttk.Entry(box, textvariable=self.bore)
+        self.bore_entry.grid(row=0, column=1, sticky="ew", padx=(P(8), 0))
+        ttk.Label(box, style="Hint.TLabel", wraplength=wrap - P(24), justify="left", text=(
+            "Hesap, kart ya da abonelik gerekmez. Herkese açık ücretsiz bir sunucu (bore.pub) kullanılır: sunucu "
+            "başkasına aittir, süreklilik garantisi yoktur. Trafik uçtan uca şifreli olduğundan sunucu içeriği göremez.")
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(P(6), 0))
 
         self.ngrok_box = box = ttk.LabelFrame(self, text="ngrok", padding=P(10))
         box.grid(row=3, column=0, columnspan=3, sticky="ew")
@@ -542,8 +556,8 @@ class HostPanel(ttk.Frame):
             "sonraki bağlantılar aynı cihazdan sormadan kabul edilir.")
         ).grid(row=12, column=0, columnspan=3, sticky="w", pady=(P(10), 0))
 
-        self._inputs = [self.rb_ngrok, self.rb_relay, self.token_entry, self.relay_entry, self.relay_token_entry,
-                        self.pw_entry, self.regen]
+        self._inputs = [self.rb_bore, self.rb_ngrok, self.rb_relay, self.bore_entry, self.token_entry, self.relay_entry,
+                        self.relay_token_entry, self.pw_entry, self.regen]
         if self.cfg["k"]:
             self.pw.set(SAVED_PW)  # şifrenin kendisi diskte yok; yalnızca k
         else:
@@ -568,20 +582,21 @@ class HostPanel(ttk.Frame):
 
     def _blocker(self):
         """Başlatmayı engelleyen sebep ('' = engel yok); şifre sebebi şifre notunda gösterilir."""
-        if self.mode.get() == "ngrok":
+        mode = self.mode.get()
+        if mode == "ngrok":
             if not self.token.get().strip():
                 return "ngrok Authtoken girmeden başlatılamaz."
-        elif not (parse_relay(self.relay.get()) and self.relay_token.get().strip()):
+        elif mode == "relay" and not (parse_relay(self.relay.get()) and self.relay_token.get().strip()):
             return "Relay adresi (host:port) ve anahtarı gerekli."
-        return ""
+        return ""  # bore: boş sunucu alanı varsayılana (bore.pub) düşer
 
     def _refresh(self, *_):
         running = self.host is not None
-        ngrok = self.mode.get() == "ngrok"
-        (self.relay_box if ngrok else self.ngrok_box).grid_remove()
-        (self.ngrok_box if ngrok else self.relay_box).grid()
+        mode = self.mode.get()
+        for name, box in (("bore", self.bore_box), ("ngrok", self.ngrok_box), ("relay", self.relay_box)):
+            box.grid() if name == mode else box.grid_remove()
         if not running:
-            self.conn.set(ID_PLACEHOLDER if ngrok else fmt_id(self.cfg["relay_id"]))
+            self.conn.set(fmt_id(self.cfg["relay_id"]) if mode == "relay" else ID_PLACEHOLDER)
         kind, block = self._pw_kind(), self._blocker()
         text, tone = {
             "saved": ("Kayıtlı şifre kullanılacak. Yeni şifre için Yenile'ye basın.", "hint"),
@@ -630,7 +645,8 @@ class HostPanel(ttk.Frame):
         if self._blocker() or kind == "short":
             return
         cfg, mode = self.cfg, self.mode.get()
-        cfg.update(mode=mode, ngrok_token=self.token.get().strip(), relay=self.relay.get().strip(),
+        cfg.update(mode=mode, bore_server=self.bore.get().strip() or config.DEFAULT_BORE_SERVER,
+                   ngrok_token=self.token.get().strip(), relay=self.relay.get().strip(),
                    relay_token=self.relay_token.get().strip())
         if kind != "saved":
             # shortcut: scrypt (~80 ms) Tk iş parçacığında, yükseltme: maliyet artarsa iş parçacığına taşı

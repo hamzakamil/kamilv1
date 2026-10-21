@@ -9,6 +9,7 @@ import threading
 DEFAULT_RELAY = ""
 DEFAULT_RELAY_TOKEN = ""
 DEFAULT_NGROK_TOKEN = ""
+DEFAULT_BORE_SERVER = "bore.pub"  # hesapsız, ücretsiz herkese açık tünel sunucusu; "sunucu" ya da "sunucu:kontrol_portu"
 
 APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Kamil V1")
 
@@ -35,7 +36,9 @@ def load() -> dict:
                 pass
         defaults = {
             "uid": secrets.token_hex(16),
-            "mode": "ngrok",
+            "mode": "bore",
+            "bore_server": DEFAULT_BORE_SERVER,
+            "bore_port": 0,  # son verilen genel port: aynı portu isteyerek ID'yi kararlı tutmayı dener
             "ngrok_token": DEFAULT_NGROK_TOKEN,
             "relay": DEFAULT_RELAY,
             "relay_token": DEFAULT_RELAY_TOKEN,

@@ -108,6 +108,19 @@ class Rig:
     def is_foreground(self):
         return self.top(u32.GetForegroundWindow()) == self.me()
 
+    def fg_info(self):
+        """Teşhis: ön plandaki pencerenin başlığı ve sınıfı (yalnızca abort iletisi için)."""
+        try:
+            h = u32.GetForegroundWindow()
+            if not h:
+                return "ön planda pencere yok (masaüstü/kilit?)"
+            title, cls = ctypes.create_unicode_buffer(120), ctypes.create_unicode_buffer(80)
+            u32.GetWindowTextW(h, title, 120)
+            u32.GetClassNameW(h, cls, 80)
+            return f"başlık={title.value!r} sınıf={cls.value!r}"
+        except Exception as e:  # noqa: BLE001
+            return f"okunamadı ({e})"
+
     def async_down(self, vk):
         return bool(u32.GetAsyncKeyState(vk) & 0x8000)
 
@@ -177,7 +190,7 @@ class Rig:
         if not me or not u32.IsWindowVisible(me):
             raise Abort("test penceresi görünür değil", code)
         if foreground and not self.is_foreground():
-            raise Abort("ön plandaki pencere test penceresi değil", code)
+            raise Abort("ön plandaki pencere test penceresi değil: " + self.fg_info(), code)
         if point and self.top(u32.WindowFromPoint(wt.POINT(*point))) != me:
             raise Abort(f"{point} noktasındaki pencere test penceresi değil", code)
 

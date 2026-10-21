@@ -290,9 +290,33 @@ def test_host_relay_mode_layout_is_not_clipped(make_app):
 
 # --- Host paneli: Başlat kuralları, şifre politikası ---
 
+def test_default_mode_is_the_accountless_tunnel_and_start_needs_nothing(make_app):
+    hp = make_app().host_panel
+    assert hp.mode.get() == "bore" and hp.bore.get() == config.DEFAULT_BORE_SERVER
+    assert not hp.btn.instate(["disabled"]) and hp.hint.cget("text") == ""  # token/anahtar istemez
+    assert hp.bore_box.winfo_manager() and not hp.ngrok_box.winfo_manager() and not hp.relay_box.winfo_manager()
+    assert "bore.pub" in " ".join(texts(hp.bore_box)) and "kart" in " ".join(texts(hp.bore_box))
+
+
+def test_start_hands_the_bore_server_and_mode_to_the_host_and_saves_them(make_app):
+    app = make_app()
+    hp = app.host_panel
+    app.show(hp)
+    hp.bore.set("  tunel.example.com:7000  ")
+    hp._toggle()
+    host = StubHost.made[-1]
+    assert host.mode == "bore" and host.cfg["bore_server"] == "tunel.example.com:7000"
+    assert hp.conn.get() == gui.ID_PREPARING
+    hp.stop()
+    hp.bore.set("")  # boş alan varsayılana düşer
+    hp._toggle()
+    assert StubHost.made[-1].cfg["bore_server"] == config.DEFAULT_BORE_SERVER
+
+
 def test_start_disabled_without_token_in_ngrok_mode(make_app):
     hp = make_app().host_panel
-    assert hp.mode.get() == "ngrok" and hp.token.get() == config.DEFAULT_NGROK_TOKEN == ""
+    hp.mode.set("ngrok")
+    assert hp.token.get() == config.DEFAULT_NGROK_TOKEN == ""
     assert hp.btn.cget("text") == "Hazır Ol / Başlat" and hp.btn.instate(["disabled"])
     assert "Authtoken" in hp.hint.cget("text")
     hp.token.set("   ")

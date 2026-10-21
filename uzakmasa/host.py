@@ -28,6 +28,9 @@ STATS_EVERY = 2.0
 RELAY_WAIT = 60         # relay'den K gelmezse kayıt ölü sayılır
 RELAY_HOLD_MIN = 5      # bundan kısa yaşayan kayıt sağlıklı sayılmaz: geri çekilme uygulanır
 RETRY_MIN, RETRY_MAX = 2, 30
+BORE_CONTROL = 7835     # bore sunucusunun kontrol portu (ekzhang/bore protokolü)
+BORE_FRAME_MAX = 256    # bore çerçevesi: JSON + "\0", en çok bu kadar bayt
+MAX_BORE_ACCEPT = 16    # eşzamanlı Accept bağlantısı: ziyaretçi seli iş parçacığı seli olmasın
 
 _UID = re.compile(r"[0-9a-f]{32}")
 
@@ -67,6 +70,24 @@ def _keepalive(sock):
         pass
 
 
+def _bore_send(sock, msg):
+    sock.sendall(json.dumps(msg, separators=(",", ":")).encode("utf-8") + b"\0")
+
+
+def _bore_frame(sock, buf):
+    """Bir bore çerçevesi okur (JSON, sonu "\\0"). Kontrol soketinde ham veri yoktur, bu yüzden arabellek güvenli."""
+    while b"\0" not in buf:
+        if len(buf) > BORE_FRAME_MAX:
+            raise ValueError("bore çerçevesi çok uzun")
+        chunk = sock.recv(BORE_FRAME_MAX)
+        if not chunk:
+            raise ConnectionError("bore sunucusu bağlantıyı kapattı")
+        buf += chunk
+    frame, _, rest = bytes(buf).partition(b"\0")
+    buf[:] = rest
+    return json.loads(frame)
+
+
 def _ngrok_hint(e, token):
     msg = " ".join(str(e).split())
     if token:
@@ -88,8 +109,8 @@ def _ngrok_hint(e, token):
 
 class Host:
     def __init__(self, cfg, ui, mode, save=lambda cfg: None, grabber_factory=None, injector=None, fail_delay=1.0):
-        if mode not in ("ngrok", "relay"):
-            raise ValueError("kip 'ngrok' ya da 'relay' olmalı")
+        if mode not in ("bore", "ngrok", "relay"):
+            raise ValueError("kip 'bore', 'ngrok' ya da 'relay' olmalı")
         self._key = bytes.fromhex(cfg.get("k", ""))
         if len(self._key) != 32:
             raise ValueError("şifre anahtarı (k) 32 bayt olmalı")
@@ -109,7 +130,8 @@ class Host:
         self._ch = None  # etkin oturumun kanalı ve istemci özeti: kick/stop buradan kapatır
         self._uid_hash = None
         self._listener = None
-        self._relay_sock = None
+        self._relay_sock = None  # relay ya da bore kontrol soketi: stop() bunu kapatıp bekleyen okumayı uyandırır
+        self._bore_slots = threading.BoundedSemaphore(MAX_BORE_ACCEPT)
         self._ncfg = None
 
     # --- dış yüzey: hiçbiri bloklamaz, hiçbiri ui çağırmaz (çağıran Tk iş parçacığı olabilir) ---
@@ -118,7 +140,7 @@ class Host:
         if self._started:
             return
         self._started = True
-        run = self._run_ngrok if self.mode == "ngrok" else self._run_relay
+        run = {"bore": self._run_bore, "ngrok": self._run_ngrok, "relay": self._run_relay}[self.mode]
         threading.Thread(target=self._guard, args=(run,), name="host-main", daemon=True).start()
 
     def stop(self):
@@ -248,6 +270,87 @@ class Host:
                 threading.Thread(target=self._guard, args=(self.serve_conn, conn, addr), name="host-conn", daemon=True).start()
         finally:
             winio.keep_awake(False)
+
+    # --- bore kipi: hesapsız, ücretsiz herkese açık tünel (ekzhang/bore protokolü; sunucu varsayılanı bore.pub) ---
+
+    def _run_bore(self):
+        host, _, cp = (self.cfg.get("bore_server") or config.DEFAULT_BORE_SERVER).strip().partition(":")
+        if not host or (cp and not (cp.isascii() and cp.isdigit() and 0 < int(cp) < 65536)):
+            self.ui.error("bore sunucusu 'sunucu' ya da 'sunucu:port' biçiminde olmalı")
+            return
+        control = (host, int(cp) if cp else BORE_CONTROL)
+        want = self.cfg.get("bore_port")
+        want = want if type(want) is int and 1024 <= want <= 65535 else 0  # önceki port: ID kararlı kalsın
+        backoff, awake = RETRY_MIN, False
+        try:
+            while not self._stopped.is_set():
+                ctrl = held = None
+                try:
+                    ctrl = socket.create_connection(control, 10)
+                    self._relay_sock = ctrl
+                    if self._stopped.is_set():
+                        return
+                    _keepalive(ctrl)
+                    ctrl.settimeout(10)  # sunucu ~0.5 sn'de bir Heartbeat yollar: 10 sn sessizlik = ölü
+                    buf = bytearray()
+                    _bore_send(ctrl, {"Hello": want})
+                    msg = _bore_frame(ctrl, buf)
+                    if want and isinstance(msg, dict) and "Error" in msg:
+                        want = 0  # eski port dolu ya da aralık dışı: rastgele port iste
+                        self._log("Önceki genel port alınamadı, yeni port isteniyor")
+                        continue
+                    if not (isinstance(msg, dict) and type(msg.get("Hello")) is int):
+                        if isinstance(msg, dict) and "Challenge" in msg:
+                            self.ui.error("Bu bore sunucusu gizli anahtar istiyor: bore.pub'u kullanın ya da relay kipini seçin")
+                            return
+                        raise ConnectionError("bore cevabı: %.80r" % (msg,))
+                    want = msg["Hello"]
+                    with self._cfg_lock:
+                        self.cfg["bore_port"] = want
+                    self._persist()
+                    self.conn_id = "%s:%d" % (host, want)
+                    held = time.monotonic()
+                    self.ui.ready(self.conn_id)
+                    if not awake:
+                        winio.keep_awake(True)
+                        awake = True
+                        self._log("Uyku engellendi")
+                    while not self._stopped.is_set():
+                        msg = _bore_frame(ctrl, buf)
+                        uid = msg.get("Connection") if isinstance(msg, dict) else None  # "Heartbeat" düz metindir: yok say
+                        if type(uid) is str and len(uid) <= 64 and self._bore_slots.acquire(blocking=False):
+                            threading.Thread(target=self._guard, args=(self._bore_accept, control, uid),
+                                             name="host-conn", daemon=True).start()
+                except Exception as e:  # ağ hatası da beklenmeyen hata da döngüyü öldürmesin
+                    if not self._stopped.is_set():
+                        kind = "" if isinstance(e, (OSError, ValueError)) else "\n" + traceback.format_exc()
+                        self._log("bore bağlantısı kesildi: %r%s" % (e, kind))
+                finally:
+                    if ctrl is not None:
+                        ctrl.close()
+                if self._stopped.is_set():
+                    break
+                if held is not None and time.monotonic() - held >= RELAY_HOLD_MIN:
+                    backoff, delay = RETRY_MIN, 0  # sağlıklı bağlantı kaybı: hemen yeniden bağlan
+                else:
+                    delay, backoff = backoff, min(backoff * 2, RETRY_MAX)
+                self._stopped.wait(delay)
+        finally:
+            if awake:
+                winio.keep_awake(False)
+
+    def _bore_accept(self, control, uid):
+        """Sunucu "Connection" deyince: yeni bağlantı aç, Accept yolla; sonrası ziyaretçiye giden ham akıştır."""
+        try:
+            sock = socket.create_connection(control, 10)
+            try:
+                _bore_send(sock, {"Accept": uid})
+            except OSError:
+                sock.close()
+                raise
+            self.serve_conn(sock, "bore tüneli")  # kapatmayı serve_conn yapar
+        finally:
+            self._bore_slots.release()
 
     # --- relay kipi ---
 

@@ -35,7 +35,8 @@ def test_defaults_generated_once_and_stable_across_loads(appdir):
     a = config.load()
     assert re.fullmatch(r"[0-9a-f]{32}", a["uid"])
     assert re.fullmatch(r"[0-9]{9}", a["relay_id"])
-    assert a["mode"] == "ngrok" and a["k"] == "" and a["trusted"] == []
+    assert a["mode"] == "bore" and a["k"] == "" and a["trusted"] == []  # hesapsız yol varsayılan
+    assert a["bore_server"] == config.DEFAULT_BORE_SERVER == "bore.pub" and a["bore_port"] == 0
     assert a["ngrok_token"] == config.DEFAULT_NGROK_TOKEN
     assert a["relay"] == config.DEFAULT_RELAY and a["relay_token"] == config.DEFAULT_RELAY_TOKEN
     assert read_raw(appdir) == a  # üretilen kimlikler kalıcı olmalı
@@ -65,7 +66,7 @@ def test_wrong_types_and_formats_replaced_with_defaults(appdir):
     (appdir / CFG).write_text(json.dumps(bad), encoding="utf-8")
     cfg = config.load()
     assert re.fullmatch(r"[0-9a-f]{32}", cfg["uid"]) and re.fullmatch(r"[0-9]{9}", cfg["relay_id"])
-    assert cfg["trusted"] == [] and cfg["mode"] == "ngrok" and cfg["k"] == ""
+    assert cfg["trusted"] == [] and cfg["mode"] == "bore" and cfg["k"] == ""
     assert cfg["relay"] == config.DEFAULT_RELAY and cfg["ngrok_token"] == config.DEFAULT_NGROK_TOKEN
     # biçimi tutan uid korunur, 9 haneli olmayan relay_id yenilenir
     (appdir / CFG).write_text(json.dumps({"uid": "a" * 32, "relay_id": "12345678"}), encoding="utf-8")
