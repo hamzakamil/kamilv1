@@ -1,0 +1,4 @@
+mss==10.2.0
+pyngrok==9.0.2
+pillow==13.0.0
+cryptography==50.0.2

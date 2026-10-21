@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Proje venv'i (build.bat kendi olusturur)
+.venv/
+
+# PyInstaller cikti ve build dosyalari
+dist/
+build/
+*.spec
+
+# Bu calisma dizinine ozel, uygulamayla ilgisiz dosyalar
+.claude/
+.mcp.json
+
+# Test sirasinda yanlislikla proje koku altina dusebilecek gecici klasorler
+/tmp*/
